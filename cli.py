@@ -29,7 +29,7 @@ DEFAULT_CUSTOM_POSITION = 70.0
 UI_VOICE_MODE_UPLOAD = "upload"
 # 这两种保存的配音方式都表示不要自动配音。
 UI_VOICE_MODES_WITHOUT_TTS = frozenset({UI_VOICE_MODE_NONE, UI_VOICE_MODE_UPLOAD})
-_PIPELINE_STAGES = ("script", "terms", "audio", "subtitle", "materials", "video")
+_PIPELINE_STAGES = ("script", "terms", "audio", "subtitle", "images", "materials", "video")
 _CUSTOM_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 _BATCH_FILE_MAX_BYTES = 1024 * 1024
 _BATCH_TASK_MAX_COUNT = 100
@@ -248,13 +248,24 @@ Batch manifests:
         default=None,
         help="replace the default LLM system prompt for script generation",
     )
+    content_group.add_argument(
+        "--image-style",
+        default=None,
+        help="image generation style suffix appended to every prompt (e.g. '3D pixar style, vibrant colors')",
+    )
 
     material_group = parser.add_argument_group("materials and pipeline")
     material_group.add_argument(
         "--video-source",
         default="pexels",
-        choices=["pexels", "pixabay", "coverr", "volcengine_seedance", "local"],
+        choices=["pexels", "pixabay", "coverr", "volcengine_seedance", "local", "ai_image"],
         help="video material provider; online providers require matching API keys in config.toml",
+    )
+    material_group.add_argument(
+        "--image-segment-mode",
+        default=None,
+        choices=["merged", "per_srt"],
+        help="AI image segmentation: merged groups punctuation into sentences (default, ~7 images) or per_srt keeps every subtitle line separate (~28 images)",
     )
     material_group.add_argument(
         "--video-materials",
@@ -739,6 +750,8 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "stroke_color",
         "stroke_width",
         "rounded_subtitle_background",
+        "image_style",
+        "image_segment_mode",
     ]
     for name in optional_arg_names:
         value = getattr(args, name)
