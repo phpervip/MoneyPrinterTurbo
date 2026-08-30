@@ -146,6 +146,7 @@ _RUNTIME_CONFIG_SECTIONS = {
     "siliconflow": config.siliconflow,
     "fish_audio": config.fish_audio,
     "ui": config.ui,
+    "ai_image": config.ai_image,
 }
 # 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
 # 避免把任务记录、config.toml 或其它 JSON 误当成本功能的导出文件。
@@ -1303,6 +1304,10 @@ def _apply_restored_params(params):
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
     )
+    # AI 生图分段模式（历史任务可能没有该字段，默认 merged 保持兼容）
+    _set_stable_widget_value(
+        "ai_image_segment_mode_select", params.get("image_segment_mode") or "merged"
+    )
 
     # 音频设置。TTS server 未写入旧任务，根据历史 voice_name 推断。
     voice_name = params.get("voice_name") or voice.NO_VOICE_NAME
@@ -1694,6 +1699,195 @@ def _render_generation_logs(task_id):
     st.code("\n".join(log_records))
 
 
+def _render_ai_image_prompts_result(task_id, task):
+    """渲染 ai_image 仅生成提示词的断点结果：可复制、可下载、提示 ComfyUI 路径。"""
+    task_dir = utils.task_dir(task_id)
+    prompts_txt_path = os.path.join(task_dir, "image_prompts.txt")
+    prompts_json_path = os.path.join(task_dir, "image_prompts.json")
+    # 兼容部分旧任务只写了 state.image_prompts 而没落盘 txt 的情况
+    has_txt = os.path.isfile(prompts_txt_path) and os.path.getsize(prompts_txt_path) > 0
+    has_json = os.path.isfile(prompts_json_path) and os.path.getsize(prompts_json_path) > 0
+    image_prompts = task.get("image_prompts") or []
+    if not has_txt and not has_json and not image_prompts:
+        st.warning(tr("Image Prompts Not Found"))
+        return
+    st.success(tr("Image Prompts Generated"))
+    st.caption(tr("Image Prompts Help").format(task_dir=task_dir))
+    # 优先读落盘的 txt（ComfyUI 友好），否则用 task 中的 prompts 拼
+    txt_content = ""
+    if has_txt:
+        try:
+            with open(prompts_txt_path, "r", encoding="utf-8") as f:
+                txt_content = f.read()
+        except Exception:
+            txt_content = ""
+    if not txt_content and image_prompts:
+        try:
+            txt_content = "\n".join(str(item.get("prompt", "")) for item in image_prompts if item.get("prompt"))
+        except Exception:
+            txt_content = ""
+    if txt_content:
+        st.code(txt_content, language="text")
+        st.download_button(
+            tr("Download Prompts TXT"),
+            data=txt_content.encode("utf-8"),
+            file_name="image_prompts.txt",
+            mime="text/plain",
+            key=f"download_prompts_txt_{task_id}",
+            icon=":material/download:",
+            use_container_width=True,
+        )
+    # JSON 详情（每段原文+prompt）
+    json_content = ""
+    if has_json:
+        try:
+            with open(prompts_json_path, "r", encoding="utf-8") as f:
+                json_content = f.read()
+        except Exception:
+            json_content = ""
+    if not json_content and image_prompts:
+        try:
+            import json as _json
+            json_content = _json.dumps(image_prompts, ensure_ascii=False, indent=2)
+        except Exception:
+            json_content = ""
+    if json_content:
+        with st.expander(tr("View Prompts JSON")):
+            st.code(json_content, language="json")
+            st.download_button(
+                tr("Download Prompts JSON"),
+                data=json_content.encode("utf-8"),
+                file_name="image_prompts.json",
+                mime="application/json",
+                key=f"download_prompts_json_{task_id}",
+                icon=":material/download:",
+            )
+    # 二阶段入口：外部生图后回填目录并合成
+    st.info(tr("External Images Help").format(task_dir=os.path.join(task_dir, "images")))
+    # 支持 WebUI 直接上传外部生成的图片，回填到 task 的 images 目录
+    uploaded_images = st.file_uploader(
+        tr("Upload External Images"),
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"external_images_uploader_{task_id}",
+        help=tr("Upload External Images Help"),
+    )
+    if uploaded_images:
+        images_dir = os.path.join(task_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        # 按上传顺序重命名为 scene-00.png, scene-01.png ... 覆盖旧图
+        for idx, file in enumerate(uploaded_images):
+            ext = os.path.splitext(file.name)[1].lower() or ".png"
+            if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                ext = ".png"
+            dest = os.path.join(images_dir, f"scene-{idx:02d}.png")
+            with open(dest, "wb") as out:
+                out.write(file.getbuffer())
+        st.success(tr("External Images Uploaded").format(count=len(uploaded_images), dir=images_dir))
+        # 记录已上传，刷新后仍可见合成按钮
+        st.session_state[f"external_images_ready_{task_id}"] = True
+
+    # 手动批量复制后的重命名工具（参考 docs/images_rename.txt：按名称排序→scene-00.png）
+    images_dir = os.path.join(task_dir, "images")
+    if os.path.isdir(images_dir):
+        png_files = sorted(
+            [f for f in os.listdir(images_dir) if f.lower().endswith(".png") and os.path.isfile(os.path.join(images_dir, f))]
+        )
+        if png_files:
+            with st.expander(tr("Rename Images Tool"), expanded=False):
+                st.caption(tr("Rename Images Help").format(dir=images_dir, count=len(png_files)))
+                # 预览映射：按当前名称排序 → scene-00.png
+                preview_lines = []
+                for idx, fname in enumerate(png_files):
+                    new_name = f"scene-{idx:02d}.png"
+                    preview_lines.append(f"{fname}  →  {new_name}")
+                st.code("\n".join(preview_lines), language="text")
+                # 已是标准命名则提示无需重命名
+                is_already_standard = all(
+                    fname == f"scene-{idx:02d}.png" for idx, fname in enumerate(png_files)
+                )
+                if is_already_standard:
+                    st.info(tr("Images Already Renamed"))
+                else:
+                    if st.button(
+                        tr("Rename Images Now"),
+                        key=f"rename_images_{task_id}",
+                        icon=":material/drive_file_rename_outline:",
+                        use_container_width=True,
+                    ):
+                        try:
+                            # 两阶段改名避免覆盖冲突：先改临时名，再改最终名
+                            import uuid
+                            temp_map = {}
+                            for idx, fname in enumerate(png_files):
+                                src = os.path.join(images_dir, fname)
+                                tmp = os.path.join(images_dir, f"__tmp_rename_{uuid.uuid4().hex[:8]}_{idx}.png")
+                                os.rename(src, tmp)
+                                temp_map[tmp] = os.path.join(images_dir, f"scene-{idx:02d}.png")
+                            for tmp, dest in temp_map.items():
+                                # 若目标已存在（理论上已移走），先移除
+                                if os.path.exists(dest):
+                                    os.remove(dest)
+                                os.rename(tmp, dest)
+                            st.success(tr("Images Rename Success").format(count=len(png_files)))
+                            st.rerun(scope="app")
+                        except Exception as exc:
+                            logger.exception(f"rename images failed: task_id={task_id}, {exc}")
+                            st.error(tr("Images Rename Failed").format(error=str(exc)))
+                st.caption(tr("Or Manual Copy Help").format(dir=images_dir))
+        else:
+            st.caption(tr("Or Manual Copy Help").format(dir=images_dir))
+    else:
+        st.caption(tr("Or Manual Copy Help").format(dir=images_dir))
+
+    resume_col1, resume_col2 = st.columns(2)
+    with resume_col1:
+        if st.button(
+            tr("Assemble With External Images"),
+            key=f"assemble_external_{task_id}",
+            use_container_width=True,
+            type="primary",
+            icon=":material/movie:",
+        ):
+            # 复用同一 task_id，重新提交完整视频任务：task.py 会复用已有的 prompts.json 并跳过已存在的 scene-*.png
+            try:
+                # 从 task 的持久化 params 恢复完整参数，避免当前页面改过主题影响
+                restored = _safe_load_task_script(task_dir)
+                raw_params = restored.get("params") or task
+                # 优先用 script.json 的完整 params，否则用当前 task 快照
+                if isinstance(raw_params, dict) and raw_params.get("video_subject"):
+                    from app.models.schema import VideoParams as _VP
+                    resume_params = _VP.model_validate(raw_params)
+                else:
+                    # 回退：从 task 状态里尽量恢复
+                    from app.models.schema import VideoParams as _VP
+                    resume_params = _VP.model_validate({
+                        "video_subject": task.get("video_subject") or task.get("script", "")[:50] or "resume",
+                        "video_source": "ai_image",
+                    })
+                # 保持与首次提交一致的 segment 模式
+                if not getattr(resume_params, "image_segment_mode", None):
+                    resume_params.image_segment_mode = task.get("image_segment_mode") or "merged"
+                # 标记为 resumed，避免 _prepare_generation_task 再次生成新任务ID的干扰
+                st.session_state["pending_generation_task_id"] = task_id
+                st.session_state["pending_stop_at"] = "video"
+                _add_active_generation_task(task_id, subject=resume_params.video_subject or task_id)
+                st.session_state["current_generation_task_id"] = task_id
+                webui_task.submit_generation(
+                    task_id=task_id,
+                    params=resume_params,
+                    capture_logs=not config.ui.get("hide_log", False),
+                    stop_at="video",
+                )
+                st.toast(tr("Assembling Video"))
+                st.rerun(scope="app")
+            except Exception as exc:
+                logger.exception(f"failed to resume ai_image task: {task_id}, {exc}")
+                st.error(tr("Video Generation Failed"))
+    with resume_col2:
+        st.caption(tr("Or Manual Copy Help").format(dir=os.path.join(task_dir, "images")))
+
+
 def _render_generation_task_snapshot(task_id, task):
     """根据状态存储中的快照渲染进度、失败原因或最终成片。"""
     if not task:
@@ -1716,6 +1910,12 @@ def _render_generation_task_snapshot(task_id, task):
         error = str(task.get("error") or "").strip()
         message = tr("Video Generation Failed")
         st.error(f"{message}: {error}" if error else message)
+        _render_generation_logs(task_id)
+        return
+
+    # ai_image 断点：仅生成提示词的完成态（没有 videos，但有 image_prompts）
+    if task.get("image_prompts") and not (task.get("videos") or []):
+        _render_ai_image_prompts_result(task_id, task)
         _render_generation_logs(task_id)
         return
 
@@ -3816,6 +4016,7 @@ def _render_video_settings(panel, params):
                 (tr("WaveSpeed AI Video"), "wavespeed"),
                 (tr("Volcano Engine Seedance"), "volcengine_seedance"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
+                (tr("AI Image"), "ai_image"),
                 (tr("Local file"), "local"),
             ]
 
@@ -3836,6 +4037,29 @@ def _render_video_settings(panel, params):
                 st.caption(tr("WaveSpeed AI Video Help"))
             if params.video_source == "volcengine_seedance":
                 st.caption(tr("Volcano Engine Seedance Help"))
+
+            if params.video_source == "ai_image":
+                # AI 生图分段模式：merged 按句号合并（默认，语义完整，7张左右）；per_srt 按字幕每行逐句出图（28张左右）
+                ai_segment_options = [
+                    (tr("AI Image Segment Merged"), "merged"),
+                    (tr("AI Image Segment Per SRT"), "per_srt"),
+                ]
+                image_segment_mode_values = [v for _, v in ai_segment_options]
+                saved_segment_mode = str(
+                    config.ui.get("image_segment_mode", config.ai_image.get("image_segment_mode", "merged") or "merged")
+                ).strip().lower()
+                if saved_segment_mode not in image_segment_mode_values:
+                    saved_segment_mode = "merged"
+                params.image_segment_mode = stable_selectbox(
+                    tr("AI Image Segment Mode"),
+                    options=image_segment_mode_values,
+                    default_value=saved_segment_mode,
+                    key="ai_image_segment_mode_select",
+                    format_func=lambda v: dict((val, label) for label, val in ai_segment_options)[v],
+                    help=tr("AI Image Segment Mode Help"),
+                )
+                _set_runtime_config("ui", "image_segment_mode", params.image_segment_mode)
+                _set_runtime_config("ui", "image_segment_mode", params.image_segment_mode)
 
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
@@ -5742,15 +5966,49 @@ def _render_generation_controls(
 
     _render_settings_transfer(params)
 
-    start_button = st.button(
-        tr("Generate Video"),
-        use_container_width=True,
-        type="primary",
-        key="generate_video_button",
-        on_click=_prepare_generation_task,
-    )
+    # ai_image 分步模式：仅生成提示词 vs 完整视频
+    is_ai_image = params.video_source == "ai_image"
+    if is_ai_image:
+        cols = st.columns(2)
+        with cols[0]:
+            prompts_only_button = st.button(
+                tr("Generate Image Prompts Only"),
+                use_container_width=True,
+                key="generate_prompts_button",
+                on_click=_prepare_generation_task,
+            )
+        with cols[1]:
+            start_button = st.button(
+                tr("Generate Video"),
+                use_container_width=True,
+                type="primary",
+                key="generate_video_button",
+                on_click=_prepare_generation_task,
+            )
+        # 记录本次点击的 stop_at，优先级：仅提示词 > 完整视频
+        if prompts_only_button:
+            st.session_state["pending_stop_at"] = "images"
+        elif start_button:
+            st.session_state["pending_stop_at"] = "video"
+        else:
+            start_button = False
+            prompts_only_button = False
+        # 统一触发逻辑
+        triggered_button = prompts_only_button or start_button
+    else:
+        start_button = st.button(
+            tr("Generate Video"),
+            use_container_width=True,
+            type="primary",
+            key="generate_video_button",
+            on_click=_prepare_generation_task,
+        )
+        triggered_button = start_button
+        if start_button:
+            st.session_state["pending_stop_at"] = "video"
+
     render_onboarding_tour()
-    if start_button:
+    if triggered_button:
         _save_runtime_config()
         task_id = st.session_state.get("pending_generation_task_id") or str(uuid4())
         _add_active_generation_task(
@@ -5769,6 +6027,7 @@ def _render_generation_controls(
             "wavespeed",
             "volcengine_seedance",
             "loomloom",
+            "ai_image",
             "local",
         ]:
             _remove_active_generation_task(task_id)
@@ -6011,15 +6270,28 @@ def _render_generation_controls(
             )
 
         try:
-            st.toast(tr("Generating Video"))
-            logger.info(tr("Start Generating Video"))
+            pending_stop_at = st.session_state.pop("pending_stop_at", "video")
+            # ai_image 仅在非 ai_image 时强制 video，避免误用 images 停在非预期阶段
+            if params.video_source != "ai_image":
+                pending_stop_at = "video"
+            if pending_stop_at == "images":
+                st.toast(tr("Generating Image Prompts"))
+                logger.info(f"WebUI generation task submitted: task_id={task_id}, stop_at=images")
+            else:
+                st.toast(tr("Generating Video"))
+                logger.info(tr("Start Generating Video"))
             logger.info(utils.to_json(params))
+            # 记录 ai_image 断点任务ID，供后续“用外部图片合成”复用
+            if params.video_source == "ai_image":
+                st.session_state["ai_image_last_task_id"] = task_id
+                st.session_state["ai_image_last_stop_at"] = pending_stop_at
             webui_task.submit_generation(
                 task_id=task_id,
                 params=params,
                 capture_logs=not config.ui.get("hide_log", False),
                 voice_preview=reusable_voice_preview,
                 loomloom_video_request=loomloom_video_request,
+                stop_at=pending_stop_at,
             )
             if loomloom_video_request is not None:
                 # 一个报价只允许提交一次。后台请求自带稳定幂等 ID；提交成功后
