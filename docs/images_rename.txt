@@ -1,0 +1,60 @@
+## PowerShell：脚本在**图片所在当前目录执行**（不用写完整路径）
+### 预览版本（只打印，不改）
+```powershell
+$files = Get-ChildItem -LiteralPath . -Filter "*.png" -File | Sort-Object Name
+$idx = 0
+foreach ($f in $files) {
+    $newName = "scene-$($idx.ToString('00')).png"
+    Write-Host ("{0}  → {1}" -f $f.Name, $newName)
+    $idx++
+}
+```
+
+### 真正改名版本
+```powershell
+$files = Get-ChildItem -LiteralPath . -Filter "*.png" -File | Sort-Object Name
+$idx = 0
+foreach ($f in $files) {
+    $newName = "scene-$($idx.ToString('00')).png"
+    Rename-Item -LiteralPath $f.FullName -NewName $newName
+    Write-Host ("已改名：{0} → {1}" -f $f.Name, $newName)
+    $idx++
+}
+```
+>使用：终端cd进入图片文件夹，粘贴运行。`.`代表**当前工作目录**。
+
+---
+
+## Python：脚本放在图片文件夹，运行脚本（当前目录）
+```python
+import os
+
+folder = "."   # 代表当前目录
+
+all_entries = os.listdir(folder)
+png_list = sorted([n for n in all_entries if n.lower().endswith(".png")])
+
+print(f"一共找到 {len(png_list)} 张png")
+
+index = 0
+for filename in png_list:
+    old_full = os.path.join(folder, filename)
+    new_filename = f"scene-{index:02d}.png"
+    new_full = os.path.join(folder, new_filename)
+    print(f"{filename} --> {new_filename}")
+
+    # 确认输出无误，去掉下面行的 # 开启改名
+    # os.rename(old_full, new_full)
+    index +=1
+```
+
+### 重要提醒
+1. 务必**先跑预览**，确认列表、顺序正确；
+2. 不要有其他程序占用图片（服务、看图软件全部关掉）；
+3. Windows下`.`就是终端当前所在文件夹，如果cd错目录，就会处理错文件。
+
+### 怎么确认当前目录对不对（PowerShell执行）
+```powershell
+Get-Location
+```
+输出路径看是不是你的images文件夹。
