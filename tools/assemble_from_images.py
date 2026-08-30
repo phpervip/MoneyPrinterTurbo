@@ -39,8 +39,13 @@ def main():
     video_script = script_data["script"]
     params = VideoParams(**script_data["params"])
 
-    # Merge segments (same logic as task.py)
-    merged_prompts = utils.merge_image_segments(raw_prompts, script=video_script)
+    # raw_prompts 已是 task.py 按 image_segment_mode 处理后的结果（merged 或 per_srt），
+    # 若已带 _span 则不再二次合并，避免 6 -> 2 的误缩
+    has_span = any(isinstance(p.get("_span"), (list, tuple)) for p in raw_prompts)
+    if has_span:
+        merged_prompts = raw_prompts
+    else:
+        merged_prompts = utils.merge_image_segments(raw_prompts, script=video_script)
     srt_path = os.path.join(task_dir, "subtitle.srt")
     srt_durations = utils.load_srt_durations(srt_path)
 
@@ -54,12 +59,26 @@ def main():
     copied = 0
 
     materials = []
-    for item in merged_prompts:
+    for idx, item in enumerate(merged_prompts):
         span = item.get("_span")
-        img_idx = span[0] if span else 0
-        img_num = img_idx + 1  # 0-indexed to 1-indexed
-        img_filename = f"100 Years of Solitude_{img_num:05d}_.png"
-        src_path = os.path.join(image_dir, img_filename)
+        # 优先按 scene-00.png 顺序（WebUI 标准命名），兼容旧的序号命名
+        scene_name = f"scene-{idx:02d}.png"
+        src_path = os.path.join(image_dir, scene_name)
+        if not os.path.exists(src_path):
+            # 回退：按 _span 首索引猜旧命名
+            img_idx = span[0] if span else idx
+            img_num = img_idx + 1
+            alt = os.path.join(image_dir, f"100 Years of Solitude_{img_num:05d}_.png")
+            if os.path.exists(alt):
+                src_path = alt
+            else:
+                # 最后回退：按目录排序的第 idx 张 png
+                pngs = sorted([f for f in os.listdir(image_dir) if f.lower().endswith(".png")]) if os.path.isdir(image_dir) else []
+                if idx < len(pngs):
+                    src_path = os.path.join(image_dir, pngs[idx])
+                else:
+                    print(f"WARNING: Image not found: {src_path}")
+                    continue
 
         if not os.path.exists(src_path):
             print(f"WARNING: Image not found: {src_path}")

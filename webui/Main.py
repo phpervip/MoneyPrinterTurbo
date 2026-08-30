@@ -1914,7 +1914,18 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     # ai_image 断点：仅生成提示词的完成态（没有 videos，但有 image_prompts）
-    if task.get("image_prompts") and not (task.get("videos") or []):
+    # 首次生成后用户可能手动拷图并刷新页面，内存状态可能已丢失，这里同时检查落盘的 image_prompts.json/txt
+    videos = task.get("videos") or []
+    has_prompts_state = bool(task.get("image_prompts"))
+    has_prompts_disk = False
+    try:
+        _task_dir_check = utils.task_dir(task_id)
+        has_prompts_disk = os.path.isfile(os.path.join(_task_dir_check, "image_prompts.json")) or os.path.isfile(
+            os.path.join(_task_dir_check, "image_prompts.txt")
+        )
+    except Exception:
+        has_prompts_disk = False
+    if (has_prompts_state or has_prompts_disk) and not videos:
         _render_ai_image_prompts_result(task_id, task)
         _render_generation_logs(task_id)
         return
@@ -2026,7 +2037,32 @@ def _render_current_generation_task():
         logger.exception(
             f"failed to query current WebUI task: task_id={task_id}, error={exc}"
         )
+        task = None
+        # 内存状态丢失时，尝试从落盘的 image_prompts 恢复 ai_image 断点展示
+        try:
+            _td = utils.task_dir(task_id)
+            if os.path.isfile(os.path.join(_td, "image_prompts.json")) or os.path.isfile(
+                os.path.join(_td, "image_prompts.txt")
+            ):
+                _render_generation_task_snapshot(task_id, {})
+                return
+        except Exception:
+            pass
         st.error(tr("Video Generation Failed"))
+        return
+
+    # 内存状态丢失（如 Streamlit 重启后）但磁盘上仍有 prompts，也要把断点 UI 兜回来
+    if not task:
+        try:
+            _td = utils.task_dir(task_id)
+            if os.path.isfile(os.path.join(_td, "image_prompts.json")) or os.path.isfile(
+                os.path.join(_td, "image_prompts.txt")
+            ):
+                _render_generation_task_snapshot(task_id, {})
+                return
+        except Exception:
+            pass
+        st.info(tr("Generating Video"))
         return
 
     state = _normalize_task_state((task or {}).get("state"))
@@ -4010,13 +4046,13 @@ def _render_video_settings(panel, params):
                 (tr("Random"), "random"),
             ]
             video_sources = [
+                (tr("AI Image"), "ai_image"),
                 (tr("Pexels"), "pexels"),
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
                 (tr("WaveSpeed AI Video"), "wavespeed"),
                 (tr("Volcano Engine Seedance"), "volcengine_seedance"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
-                (tr("AI Image"), "ai_image"),
                 (tr("Local file"), "local"),
             ]
 
