@@ -367,6 +367,39 @@ upload_post_youtube_privacy_status = "public"
 # Cross-post jobs run in the current process and are not resumed after restart.
 upload_post_max_pending_tasks = 10
 
+# -----------------------------------------------------------------------------
+# AI Image Generation / AI 图片生成
+# -----------------------------------------------------------------------------
+
+[ai_image]
+# Backend selection: "agnes" (Agnes Image 2.0 Flash) or "comfyui" (local ComfyUI)
+# 后端选择："agnes"（Agnes Image 2.0 Flash）或 "comfyui"（本地 ComfyUI）
+backend = "agnes"
+
+# -- Agnes Image 2.0 Flash (OpenAI-compatible) --
+# API key: https://apihub.agnes-ai.com
+api_key = ""
+base_url = "https://apihub.agnes-ai.com/v1"
+model_name = "agnes-image-2.0-flash"
+# Supported sizes: "1024x1024", "1024x768", "768x1024"
+size = "1024x768"
+
+# -- Local ComfyUI --
+# ComfyUI server address (default: http://127.0.0.1:8188)
+comfyui_server_address = "http://127.0.0.1:8188"
+# Path to the exported workflow API JSON file (relative to ComfyUI root)
+# ComfyUI 导出的工作流 API JSON 文件路径（相对于 ComfyUI 根目录）
+comfyui_workflow_path = "user/default/workflows/image_z_image_turbo_int8_2_batch.json"
+# Timeout in seconds for a single workflow execution
+# 单次工作流执行超时时间（秒）
+comfyui_timeout = 300
+# Number of prompts per batch (max_prompts in PromptLoopFromFile node)
+# 每批处理的提示词数量（PromptLoopFromFile 节点的 max_prompts）
+comfyui_batch_size = 10
+# Output directory for generated images (relative to ComfyUI root)
+# 生成图片的输出目录（相对于 ComfyUI 根目录）
+comfyui_output_dir = "output"
+
 # =============================================================================
 # Whisper Subtitles / Whisper 字幕
 # =============================================================================

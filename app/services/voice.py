@@ -2129,9 +2129,12 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
 
         if len(sub_items) != len(script_lines):
             logger.warning(
-                f"failed, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
+                f"mismatch, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)} - writing partial and will correct"
             )
-            return
+            if not sub_items:
+                return
+            # 43 vs 44 这种差1的常见于标点归一化，不应直接丢弃整份字幕
+            # 先落盘已有片段，后续 task.py 会用 srt_durations 兜底补齐
 
         _write_subtitle_items(sub_items, subtitle_file)
     except Exception as e:

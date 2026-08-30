@@ -5347,15 +5347,42 @@ def _render_audio_settings(panel, params):
 
             # 检查保存的声音是否在当前筛选的声音列表中
             if saved_voice_name in friendly_names:
-                saved_voice_name_index = list(friendly_names.keys()).index(
-                    saved_voice_name
-                )
+                # 已保存的声音若与当前脚本语言不匹配，自动切换到该语言的首个可用音色，避免 zh脚本配 af-ZA 的坑
+                script_lang = str(getattr(params, "video_language", "") or "").strip().lower()
+                if script_lang and not saved_voice_name.lower().startswith(script_lang):
+                    # 允许 zh-CN 匹配 zh-CN-*，或 zh 匹配 zh-*
+                    script_prefix = script_lang.split("-")[0]
+                    for i, v in enumerate(filtered_voices):
+                        vl = v.lower()
+                        if vl.startswith(script_lang) or vl.startswith(script_prefix + "-"):
+                            if i != list(friendly_names.keys()).index(saved_voice_name):
+                                saved_voice_name_index = i
+                                # 同步回配置，下次直接就是该语言
+                                _set_runtime_config("ui", "voice_name", v)
+                            break
+                    else:
+                        saved_voice_name_index = list(friendly_names.keys()).index(saved_voice_name)
+                else:
+                    saved_voice_name_index = list(friendly_names.keys()).index(
+                        saved_voice_name
+                    )
             else:
-                # 如果不在，则根据当前UI语言选择一个默认声音
-                for i, v in enumerate(filtered_voices):
-                    if v.lower().startswith(st.session_state["ui_language"].lower()):
-                        saved_voice_name_index = i
-                        break
+                # 如果不在，则优先按脚本语言，其次按界面语言选择默认声音
+                script_lang = str(getattr(params, "video_language", "") or "").strip().lower()
+                found = False
+                if script_lang:
+                    script_prefix = script_lang.split("-")[0]
+                    for i, v in enumerate(filtered_voices):
+                        vl = v.lower()
+                        if vl.startswith(script_lang) or vl.startswith(script_prefix + "-"):
+                            saved_voice_name_index = i
+                            found = True
+                            break
+                if not found:
+                    for i, v in enumerate(filtered_voices):
+                        if v.lower().startswith(st.session_state["ui_language"].lower()):
+                            saved_voice_name_index = i
+                            break
 
             # 如果没有找到匹配的声音，使用第一个声音
             if saved_voice_name_index >= len(friendly_names) and friendly_names:

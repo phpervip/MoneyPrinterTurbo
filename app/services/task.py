@@ -592,7 +592,10 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         - subtitle_path: path to the generated subtitle file
     """
     logger.info("\n\n## generating subtitle")
-    if not params.subtitle_enabled:
+    # ai_image 必须有 srt 来计算每张图时长，即使界面上“烧字幕”关掉，也要先落盘
+    # 真正是否把字幕烧进画面，由 video.generate_video 再按 subtitle_enabled 决定
+    need_srt_for_ai_image = getattr(params, "video_source", "") == "ai_image"
+    if not params.subtitle_enabled and not need_srt_for_ai_image:
         return ""
 
     subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
@@ -1436,6 +1439,7 @@ def _run_pipeline(
         prompts_path = os.path.join(task_dir, "image_prompts.json")
         
         # 检查是否已有 image_prompts.json，如果有则复用
+        prompts_txt_path = os.path.join(task_dir, "image_prompts.txt")
         if os.path.exists(prompts_path) and os.path.getsize(prompts_path) > 0:
             import json as _json
             with open(prompts_path, "r", encoding="utf-8") as f:
@@ -1473,7 +1477,6 @@ def _run_pipeline(
                 json.dump(image_prompts, f, ensure_ascii=False, indent=2)
 
             # 同时生成纯文本版本：每段一个提示词，无空行，方便 ComfyUI 批量导入
-            prompts_txt_path = os.path.join(task_dir, "image_prompts.txt")
             with open(prompts_txt_path, "w", encoding="utf-8") as f:
                 for item in image_prompts:
                     f.write(item["prompt"] + "\n")
