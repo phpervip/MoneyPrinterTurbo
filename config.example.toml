@@ -304,6 +304,9 @@ mimo_tts_style_prompt = "请用自然、清晰、适合短视频旁白的语气�
 # Subtitle provider: "edge" or "whisper". Whisper is loaded only when selected
 # explicitly; Edge failures do not trigger an automatic Whisper model download.
 # Leave empty to skip generation.
+# AI 图片分段模式：merged 按句号合并（默认，7张左右，语义完整）；per_srt 按字幕每行逐句出图（28张左右，短句也单独成图）
+# 可选值：merged / per_srt —— WebUI、CLI 和 API 均可覆盖
+# image_segment_mode = "merged"
 subtitle_provider = "edge"
 
 # FFmpeg is normally downloaded and detected automatically. If detection fails,

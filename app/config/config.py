@@ -499,6 +499,7 @@ def save_config():
         config_to_save["chatterbox"] = dict(chatterbox)
         config_to_save["fish_audio"] = dict(fish_audio)
         config_to_save["ui"] = dict(ui)
+        config_to_save["ai_image"] = dict(ai_image)
         serialized_config = toml.dumps(config_to_save)
 
         # WebUI 完整 rerun 结束时会调用保存。内容没有变化时直接返回，避免每次
@@ -562,6 +563,7 @@ ui = _SynchronizedConfig(
         },
     )
 )
+ai_image = _SynchronizedConfig(_cfg.get("ai_image", {}))
 
 hostname = socket.gethostname()
 

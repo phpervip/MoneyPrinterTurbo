@@ -42,3 +42,9 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+.gstack/
+
+.omo/
+*.log
+小白*.md
+topics.json1
