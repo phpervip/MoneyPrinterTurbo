@@ -587,6 +587,24 @@ def combine_videos(
         clip_duration = clip.duration
         clip_w, clip_h = clip.size
         close_clip(clip)
+
+        # AI 图片生成的 .png.mp4 素材时长已在 preprocess_video 按 SRT 精确设定，
+        # 不应再按 max_clip_duration 截断；否则 sequential 模式下每段只取前 5s，
+        # 9 段 6.3s/9.9s 的素材会被截为 9*5=45s，远小于音频 56s 触发 loop。
+        # 检测规则：文件名以 .png.mp4 结尾或路径包含 /images/ 即视为图片素材。
+        is_ai_image_clip = video_path.replace("\\", "/").endswith(".png.mp4") or "/images/" in video_path.replace("\\", "/")
+        if is_ai_image_clip:
+            subclipped_items.append(
+                SubClippedVideoClip(
+                    file_path=video_path,
+                    start_time=0,
+                    end_time=clip_duration,
+                    width=clip_w,
+                    height=clip_h,
+                    source_file_path=video_path,
+                )
+            )
+            continue
         
         start_time = 0
 
@@ -690,7 +708,9 @@ def combine_videos(
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
+            # AI 图片素材已按 SRT 精确时长生成，不再按 5s 兜底截断
+            _is_ai_source = subclipped_item.source_file_path.replace("\\", "/").endswith(".png.mp4") or "/images/" in subclipped_item.source_file_path.replace("\\", "/")
+            if not _is_ai_source and clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
                 
             # wirte clip to temp file
@@ -1310,19 +1330,24 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
         if not material.url:
             continue
 
+        # AI 生成的图片保存在任务目录下，不受 local_videos 安全限制
+        is_ai_image = (
+            getattr(material, "source_info", None)
+            and material.source_info.get("provider") == "ai_image"
+        )
         try:
             material_source_path = file_security.resolve_path_within_directory(
                 local_videos_dir, material.url
             )
-        except ValueError as exc:
-            # local video_source 的素材路径来自 API 参数，必须限制在专用素材目录。
-            # 允许用户传文件名，也兼容历史返回的绝对路径，但不允许逃逸到系统
-            # 其他目录，避免任意文件读取或通过 MoviePy 探测本地敏感文件。
-            logger.warning(
-                f"skip unsafe local material: {material.url}, "
-                f"local_videos_dir: {local_videos_dir}, error: {str(exc)}"
-            )
-            continue
+        except ValueError:
+            if is_ai_image and os.path.isfile(material.url):
+                material_source_path = os.path.realpath(material.url)
+            else:
+                logger.warning(
+                    f"skip unsafe local material: {material.url}, "
+                    f"local_videos_dir: {local_videos_dir}"
+                )
+                continue
 
         ext = utils.parse_extension(material_source_path)
         try:
@@ -1361,19 +1386,24 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
                 logger.info(f"processing image: {material_source_path}")
                 # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再重新创建用于导出的图片 clip。
                 close_clip(clip)
-                # Create an image clip and set its duration to 3 seconds
+                # 使用素材自身的 duration（由 SRT 累积计算），若未设置则回退到 clip_duration
+                img_duration = max(
+                    float(material.duration) if material.duration else 0.0,
+                    float(clip_duration),
+                )
+                # Create an image clip with the appropriate duration
                 clip = (
                     ImageClip(material_source_path)
-                    .with_duration(clip_duration)
+                    .with_duration(img_duration)
                     .with_position("center")
                 )
                 # Apply a zoom effect using the resize method.
                 # A lambda function is used to make the zoom effect dynamic over time.
                 # The zoom effect starts from the original size and gradually scales up to 120%.
-                # t represents the current time, and clip.duration is the total duration of the clip (3 seconds).
+                # t represents the current time, and clip.duration is the total duration of the clip.
                 # Note: 1 represents 100% size, so 1.2 represents 120% size.
                 zoom_clip = clip.resized(
-                    lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
+                    lambda t, d=img_duration: 1 + (d * 0.03) * (t / clip.duration)
                 )
 
                 # Optionally, create a composite video clip containing the zoomed clip.

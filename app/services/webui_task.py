@@ -56,6 +56,7 @@ def _run_generation(
     capture_logs: bool,
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
+    stop_at: str = "video",
 ) -> dict:
     """
     在后台线程中执行现有视频流水线。
@@ -82,6 +83,7 @@ def _run_generation(
             return tm.start(
                 task_id=task_id,
                 params=params,
+                stop_at=stop_at,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
             )
@@ -125,6 +127,7 @@ def submit_generation(
     capture_logs: bool = True,
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
+    stop_at: str = "video",
 ) -> None:
     """
     登记并提交 WebUI 视频生成任务，调用后立即返回。
@@ -153,6 +156,7 @@ def submit_generation(
             capture_logs=capture_logs,
             voice_preview=voice_preview_snapshot,
             loomloom_video_request=loomloom_request_snapshot,
+            stop_at=stop_at,
         )
     except Exception as exc:
         # 调度失败与流水线失败一样必须成为可查询状态，避免任务管理器永久显示

@@ -17,6 +17,7 @@ from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
+    image_gen,
     llm,
     loomloom,
     material,
@@ -289,7 +290,17 @@ def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
     if not video_script:
-        video_script = llm.generate_script(
+        # 检查是否已有脚本文件
+        script_json_path = os.path.join(utils.task_dir(task_id), "script.json")
+        if os.path.exists(script_json_path):
+            import json as _json
+            with open(script_json_path, "r", encoding="utf-8") as f:
+                existing = _json.load(f)
+            if existing.get("script"):
+                video_script = existing["script"]
+                logger.info(f"using existing script from {script_json_path}")
+        if not video_script:
+            video_script = llm.generate_script(
             video_subject=params.video_subject,
             language=params.video_language,
             paragraph_number=params.paragraph_number,
@@ -512,6 +523,14 @@ def generate_audio(
         return None, None, None
 
     if not custom_audio_file:
+        # 检查是否已有音频文件
+        audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
+            logger.info(f"using existing audio file: {audio_file}")
+            file_duration = voice.get_audio_duration(audio_file)
+            audio_duration = math.ceil(file_duration)
+            return audio_file, audio_duration, None
+
         reusable_preview = _resolve_reusable_voice_preview(
             task_id,
             params,
@@ -577,6 +596,12 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         return ""
 
     subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
+    
+    # 检查是否已有字幕文件
+    if os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
+        logger.info(f"using existing subtitle file: {subtitle_path}")
+        return subtitle_path
+    
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
@@ -1393,29 +1418,209 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
-    # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-    )
-    if not downloaded_videos:
-        return _mark_task_failed(
-            task_id,
-            "materials",
-            "failed to prepare video materials",
+    # 5. Generate AI images or download video materials
+    if params.video_source == "ai_image":
+        if not image_gen.is_enabled():
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "AI image generation is not configured, "
+                "please set [ai_image] in config.toml",
+            )
+
+        sm.state.update_task(
+            task_id, state=const.TASK_STATE_PROCESSING, progress=45
         )
 
-    if stop_at == "materials":
+        task_dir = utils.task_dir(task_id)
+        prompts_path = os.path.join(task_dir, "image_prompts.json")
+        
+        # 检查是否已有 image_prompts.json，如果有则复用
+        if os.path.exists(prompts_path) and os.path.getsize(prompts_path) > 0:
+            import json as _json
+            with open(prompts_path, "r", encoding="utf-8") as f:
+                image_prompts = _json.load(f)
+            logger.info(f"using existing image prompts from {prompts_path}")
+        else:
+            image_prompts = llm.generate_image_prompts(
+                video_subject=params.video_subject,
+                video_script=video_script,
+                style=params.image_style,
+            )
+            if not image_prompts:
+                return _mark_task_failed(
+                    task_id,
+                    "materials",
+                    "failed to generate image prompts",
+                )
+
+            # 分段模式：merged 按句号合并（默认，语义完整，7张左右）；per_srt 逐字幕行出图（28张左右，短句也单独成图）
+            segment_mode = str(getattr(params, "image_segment_mode", "merged") or "merged").strip().lower()
+            if segment_mode not in ("merged", "per_srt", "per-srt", "srt"):
+                segment_mode = "merged"
+            if segment_mode in ("per_srt", "per-srt", "srt"):
+                # per_srt 模式跳过合并，保留 LLM 按标点切的全部小段，每段独立成图
+                logger.info(f"ai_image segment mode: per_srt (keep {len(image_prompts)} segments, no merge)")
+            else:
+                # 合并相邻标点切分过细的片段（逗号等非句末标点不单独成图），
+                # 减少图片生成数量，同时让每张图对应一句完整的语义。
+                image_prompts = utils.merge_image_segments(image_prompts, script=video_script)
+                logger.info(f"ai_image segment mode: merged ({len(image_prompts)} groups after merge)")
+
+            # 保存提示词到任务目录，便于用户查看和编辑
+            with open(prompts_path, "w", encoding="utf-8") as f:
+                import json
+                json.dump(image_prompts, f, ensure_ascii=False, indent=2)
+
+            # 同时生成纯文本版本：每段一个提示词，无空行，方便 ComfyUI 批量导入
+            prompts_txt_path = os.path.join(task_dir, "image_prompts.txt")
+            with open(prompts_txt_path, "w", encoding="utf-8") as f:
+                for item in image_prompts:
+                    f.write(item["prompt"] + "\n")
+
+        if stop_at == "images":
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_COMPLETE,
+                progress=100,
+                image_prompts=image_prompts,
+                prompts_path=prompts_path,
+                prompts_txt_path=prompts_txt_path,
+            )
+            return {
+                "image_prompts": image_prompts,
+                "prompts_path": prompts_path,
+                "prompts_txt_path": prompts_txt_path,
+                "audio_file": audio_file,
+                "audio_duration": audio_duration,
+                "subtitle_path": subtitle_path,
+            }
+
         sm.state.update_task(
-            task_id,
-            state=const.TASK_STATE_COMPLETE,
-            progress=100,
-            materials=downloaded_videos,
+            task_id, state=const.TASK_STATE_PROCESSING, progress=55
         )
-        return {"materials": downloaded_videos}
+
+        image_dir = os.path.join(task_dir, "images")
+        generated = image_gen.generate_images_batch(
+            task_id=task_id,
+            prompts=image_prompts,
+            output_dir=image_dir,
+        )
+
+        # 构造 MaterialInfo 列表，供后续 combine_videos 使用
+        # 每个图片组的 duration 来自 SRT 字幕时间累积（_span 字段记录覆盖的原始片段范围）
+        srt_durations = utils.load_srt_durations(subtitle_path)
+        # 先计算每组的原始 float 时长，保留小数精度，避免 int(round) 累计误差导致 cycle 兜底
+        # per_srt 模式：每张图对应单行 SRT 时长（1:1）；merged 模式：按 _span 累加多行
+        is_per_srt = str(getattr(params, "image_segment_mode", "merged") or "merged").strip().lower() in ("per_srt", "per-srt", "srt")
+        raw_durations: list[float] = []
+        valid_items = []
+        for idx, item in enumerate(generated):
+            if not item.get("image_path"):
+                continue
+            if is_per_srt and srt_durations:
+                # 优先按下标 1:1 取 SRT 时长，数量不一致时退化到按索引或均分
+                if idx < len(srt_durations):
+                    st, ed = srt_durations[idx]
+                    group_duration = ed - st
+                else:
+                    span = item.get("_span")
+                    if span and span[0] < len(srt_durations):
+                        start_idx, end_idx = span
+                        end_idx = min(end_idx, len(srt_durations) - 1)
+                        group_duration = sum(ed - st for st, ed in srt_durations[start_idx : end_idx + 1])
+                    else:
+                        group_duration = 0.0
+            else:
+                span = item.get("_span")
+                if span and srt_durations:
+                    start_idx, end_idx = span
+                    group_duration = sum(
+                        ed - st
+                        for st, ed in srt_durations[start_idx : end_idx + 1]
+                    )
+                else:
+                    group_duration = 0.0
+            raw = float(group_duration) if group_duration > 0 else float(audio_duration) / max(len(generated), 1)
+            # 保留 3 位小数，与 SRT 时间戳精度一致
+            raw = round(raw, 3)
+            raw_durations.append(raw)
+            valid_items.append(item)
+
+        # 余数分配：确保总时长精确对齐 audio_duration，避免 63s vs 66.888s 的 4s 缺口触发 cycle 循环
+        if raw_durations and audio_duration:
+            total_raw = sum(raw_durations)
+            diff = round(float(audio_duration) - total_raw, 3)
+            # 仅当差值显著（>0.01s）时调整最后一组，避免浮点抖动
+            if abs(diff) > 0.01:
+                raw_durations[-1] = round(raw_durations[-1] + diff, 3)
+                # 兜底：最后一组时长不能小于 0.5s
+                if raw_durations[-1] < 0.5:
+                    raw_durations[-1] = 0.5
+
+        downloaded_videos = []
+        for item, dur in zip(valid_items, raw_durations):
+            downloaded_videos.append(
+                material.MaterialInfo(
+                    provider="ai_image",
+                    url=item["image_path"],
+                    duration=float(dur),
+                    source_info={
+                        "provider": "ai_image",
+                        "prompt": item["prompt"],
+                        "segment": item["segment"],
+                    },
+                )
+            )
+
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "failed to generate AI images",
+            )
+
+        # 将图片素材预处理为视频片段（添加缩放动效），并应用每组的 SRT 累积时长
+        downloaded_videos = video.preprocess_video(
+            materials=downloaded_videos,
+            clip_duration=params.video_clip_duration,
+        )
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "no valid AI image materials after preprocessing",
+            )
+        # combine_videos 只接收路径列表，从 MaterialInfo 提取 url
+        downloaded_videos = [m.url for m in downloaded_videos if m.url]
+
+        downloaded_videos = downloaded_videos[: len(generated)]
+        # 补齐不足（若某段图片生成失败，用空字符串占位）
+        while len(downloaded_videos) < len(generated):
+            downloaded_videos.append(None)
+    else:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+        )
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "failed to prepare video materials",
+            )
+
+        if stop_at == "materials":
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_COMPLETE,
+                progress=100,
+                materials=downloaded_videos,
+            )
+            return {"materials": downloaded_videos}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
 
