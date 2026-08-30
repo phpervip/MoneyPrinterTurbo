@@ -978,3 +978,111 @@ if __name__ == "__main__":
     )
     print("######################")
     print(search_terms)
+
+
+# =============================================================================
+# AI Image Prompt Generator
+# =============================================================================
+
+_IMAGE_PROMPT_SYSTEM_PROMPT = """\
+# Role: AI Image Prompt Engineer
+
+You are an expert at writing detailed, cinematic image prompts for AI image generation models.
+Your prompts should describe a single, evocative visual scene that captures the essence
+of the given text segment.
+
+## Guidelines
+1. Describe ONE coherent visual scene per prompt.
+2. Include lighting, mood, composition, color palette, and camera angle details.
+3. Always write in English.
+4. Keep prompts under 200 words.
+5. Make prompts visually rich and specific — avoid vague or generic descriptions.
+6. If the segment contains abstract concepts, translate them into concrete visual metaphors.
+""".strip()
+
+_IMAGE_PROMPT_USER_TEMPLATE = """\
+Video Subject: {video_subject}
+
+Script Segment #{segment_index}:
+{text_segment}
+
+Write a detailed English image prompt that visualizes this script segment.
+Only return the image prompt text, nothing else.
+""".strip()
+
+
+def generate_image_prompts(
+    video_subject: str,
+    video_script: str,
+    style: str | None = None,
+    app_config=None,
+) -> List[dict]:
+    """
+    将视频脚本按标点切分段落，为每段生成 AI 图片英文提示词。
+
+    Returns:
+        List[dict]: 每项包含 {"index": int, "segment": str, "prompt": str}
+    """
+    from app.config import config as app_config_obj
+    from app.utils import utils
+
+    if style is None:
+        style = (app_config_obj.ai_image.get("image_style", "") or "").strip()
+    if not style:
+        style = "3D pixar style, cartoon character, vibrant colors, soft lighting"
+
+    segments = utils.split_string_by_punctuations(video_script)
+    segments = [s.strip() for s in segments if s.strip()]
+    if not segments:
+        segments = [video_script.strip()]
+
+    logger.info(f"generating image prompts for {len(segments)} segments")
+
+    result = []
+    for i, segment in enumerate(segments):
+        user_msg = _IMAGE_PROMPT_USER_TEMPLATE.format(
+            video_subject=video_subject,
+            segment_index=i + 1,
+            text_segment=segment,
+        )
+
+        prompt = f"{_IMAGE_PROMPT_SYSTEM_PROMPT}\n\n{user_msg}"
+
+        for attempt in range(3):
+            try:
+                response = _generate_response(prompt, app_config=app_config)
+                if response and response.strip():
+                    # 清理可能的代码围栏
+                    cleaned = re.sub(
+                        r"```(?:markdown|text)?\n?([\s\S]*?)\n?```", r"\1", response
+                    ).strip()
+                    if cleaned:
+                        result.append(
+                            {
+                                "index": i,
+                                "segment": segment,
+                                "prompt": f"{cleaned}, {style}"
+                                if style
+                                else cleaned,
+                            }
+                        )
+                        break
+            except Exception as e:
+                logger.warning(
+                    f"image prompt generation attempt {attempt+1} failed for segment {i+1}: {e}"
+                )
+                if attempt == 2:
+                    # 降级：直接使用片段文本转英文简单描述
+                    result.append(
+                        {
+                            "index": i,
+                            "segment": segment,
+                            "prompt": f"{segment[:100]}, {style}"
+                            if style
+                            else segment[:100],
+                        }
+                    )
+                    break
+
+    logger.success(f"generated {len(result)} image prompts")
+    return result

@@ -320,6 +320,123 @@ def split_string_by_punctuations(s):
     return result
 
 
+# 终端标点：句子真正结束才单独成图（不在逗号/分号等处切图）
+_TERMINAL_PUNCTUATIONS = {"。", "！", "？", "…", "...", "！", "؟"}
+
+
+def merge_image_segments(segments: list[dict], script: str = "") -> list[dict]:
+    """
+    合并由 split_string_by_punctuations 切得过细的相邻片段。
+
+    规则：
+    - 以句号/问号/感叹号/省略号结尾的片段保持独立（真正的句子边界）
+    - 以逗号/分号/其他标点结尾的片段与下一个片段合并
+    - 合并后 segment 文本拼接，prompt 取第一段（已包含完整场景描述）
+    - 额外返回 _span 字段：[start_original_idx, end_original_idx]
+
+    参数:
+        segments: generate_image_prompts 返回的列表，每项 {"index", "segment", "prompt"}
+        script: 原始脚本文本（用于判断每个 segment 后的标点）
+    返回:
+        合并后的列表（每项额外含 "_span": [int, int]）
+    """
+    if not segments:
+        return []
+
+    # 预计算每个原始 segment 在原文中的起始位置（严格递增）
+    segment_positions = []
+    pos = 0
+    for seg in segments:
+        idx = script.find(seg["segment"], pos)
+        segment_positions.append(idx if idx >= 0 else pos)
+        if idx >= 0:
+            pos = idx + len(seg["segment"])
+        else:
+            pos += len(seg["segment"])
+
+    merged: list[dict] = []
+    span_start = 0
+    current = dict(segments[0])
+    current["segment"] = segments[0]["segment"]
+
+    for i in range(1, len(segments)):
+        # 当前 accumulated group 的末尾位置 = 最后一个已合并 segment 的结束位置
+        group_end_pos = segment_positions[i - 1] + len(segments[i - 1]["segment"])
+        term = script[group_end_pos : group_end_pos + 1] if group_end_pos < len(script) else ""
+
+        is_terminal = term in _TERMINAL_PUNCTUATIONS
+        if is_terminal:
+            current["_span"] = [span_start, i - 1]
+            merged.append(current)
+            span_start = i
+            current = dict(segments[i])
+            current["segment"] = segments[i]["segment"]
+        else:
+            current["segment"] = current["segment"] + segments[i]["segment"]
+
+    if current:
+        current["_span"] = [span_start, len(segments) - 1]
+        merged.append(current)
+
+    # 重新编号 index
+    for i, item in enumerate(merged):
+        item["index"] = i
+    return merged
+
+
+def parse_srt_timestamp(ts: str) -> float:
+    """将 SRT 时间戳字符串解析为秒数，如 '00:00:04,750' → 4.75"""
+    parts = ts.strip().replace(",", ":").split(":")
+    if len(parts) != 4:
+        return 0.0
+    return (
+        int(parts[0]) * 3600
+        + int(parts[1]) * 60
+        + int(parts[2])
+        + int(parts[3]) / 1000
+    )
+
+
+def load_srt_durations(subtitle_path: str) -> list[tuple[float, float]]:
+    """
+    解析 SRT 文件，返回 [(start_seconds, end_seconds), ...] 列表。
+    用于为合并后的图片组计算实际显示时长。
+    """
+    import re
+
+    if not subtitle_path or not os.path.isfile(subtitle_path):
+        return []
+
+    result = []
+    text = ""
+    with open(subtitle_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    for block in re.split(r"\n\n+", text.strip()):
+        lines = block.strip().split("\n")
+        if len(lines) < 2:
+            continue
+        m = re.search(
+            r"(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})",
+            lines[1],
+        )
+        if m:
+            start = (
+                int(m.group(1)) * 3600
+                + int(m.group(2)) * 60
+                + int(m.group(3))
+                + int(m.group(4)) / 1000
+            )
+            end = (
+                int(m.group(5)) * 3600
+                + int(m.group(6)) * 60
+                + int(m.group(7))
+                + int(m.group(8)) / 1000
+            )
+            result.append((start, end))
+    return result
+
+
 def normalize_script_for_subtitle_matching(video_script: str) -> str:
     """
     清理字幕匹配前的脚本文本。
