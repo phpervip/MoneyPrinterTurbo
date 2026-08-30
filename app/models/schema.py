@@ -56,7 +56,7 @@ _Config = ConfigDict(
 class MaterialInfo:
     provider: str = "pexels"
     url: str = ""
-    duration: int = 0
+    duration: float = 0
     # 在线素材搜索会附带经过筛选的公开来源信息，供搜索缓存和任务记录复用。
     # 本地上传素材不需要填写；写入任务文件前仍会按字段白名单重新构造，
     # 避免外部请求传入的签名 URL、凭据或无关字段进入持久化数据。
@@ -127,6 +127,15 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+    image_style: str = Field(
+        default="3D pixar style, cartoon character, vibrant colors, soft lighting",
+        max_length=500,
+    )
+    image_segment_mode: str = Field(
+        default="merged",
+        max_length=20,
+        description="AI image prompt segmentation: merged (sentence-level, default) or per_srt (per subtitle line)",
+    )
 
 
 class SubtitleRequest(BaseModel):
